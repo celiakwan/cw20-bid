@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InstantiateMsg {
+    pub token_addr: String,
     pub reserve_price: Uint128,
     pub increment: Uint128,
-    pub duration_in_seconds: Uint64,
+    pub duration_in_blocks: Uint64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

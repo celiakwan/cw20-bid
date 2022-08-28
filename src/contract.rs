@@ -1,9 +1,7 @@
-use std::time;
-
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::{
     entry_point, from_binary, to_binary, Addr, Binary, Deps, DepsMut, Env, MessageInfo, Response,
-    StdResult, Timestamp, Uint128, Uint64,
+    StdResult, Uint128, Uint64,
 };
 use cw2::set_contract_version;
 use cw20::{Cw20Contract, Cw20ExecuteMsg, Cw20ReceiveMsg};
@@ -18,18 +16,23 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
     deps: DepsMut,
-    _env: Env,
+    env: Env,
     info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    let timeout = now().plus_seconds(msg.duration_in_seconds.u64());
+    let timeout = env
+        .block
+        .height
+        .checked_add(msg.duration_in_blocks.u64())
+        .expect("Failed to add block height");
     let config = Config {
         seller: info.sender.clone(),
+        token_addr: deps.api.addr_validate(msg.token_addr.as_str())?,
         reserve_price: msg.reserve_price,
         increment: msg.increment,
-        timeout,
+        timeout: Uint64::new(timeout),
     };
     CONFIG.save(deps.storage, &config)?;
 
@@ -38,6 +41,7 @@ pub fn instantiate(
     Ok(Response::new()
         .add_attribute("action", "instantiate")
         .add_attribute("seller", info.sender)
+        .add_attribute("token_addr", msg.token_addr)
         .add_attribute("reserve_price", msg.reserve_price)
         .add_attribute("increment", msg.increment)
         .add_attribute("timeout", timeout.to_string()))
@@ -46,23 +50,24 @@ pub fn instantiate(
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
     deps: DepsMut,
-    _env: Env,
+    env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
     match msg {
-        ExecuteMsg::Bid { price } => execute_bid(deps, info, price),
-        ExecuteMsg::Receive(msg) => execute_receive(deps, info, msg),
+        ExecuteMsg::Bid { price } => execute_bid(deps, env.block.height, info, price),
+        ExecuteMsg::Receive(msg) => execute_receive(deps, env.block.height, info, msg),
     }
 }
 
 pub fn execute_bid(
     deps: DepsMut,
+    block_height: u64,
     info: MessageInfo,
     price: Uint128,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    if now() >= config.timeout {
+    if block_height >= config.timeout.u64() {
         return Err(ContractError::CustomError {
             val: format!("Auction closed"),
         });
@@ -133,11 +138,12 @@ pub fn execute_bid(
 
 pub fn execute_receive(
     deps: DepsMut,
+    block_height: u64,
     info: MessageInfo,
     wrapped_msg: Cw20ReceiveMsg,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    if now() < config.timeout {
+    if block_height < config.timeout.u64() {
         return Err(ContractError::CustomError {
             val: format!("Auction not yet closed"),
         });
@@ -145,12 +151,13 @@ pub fn execute_receive(
 
     let msg: ReceiveMsg = from_binary(&wrapped_msg.msg)?;
     match msg {
-        ReceiveMsg::Buy => receive_buy(deps, wrapped_msg.amount, info.sender, config.seller),
+        ReceiveMsg::Buy => receive_buy(deps, config.token_addr, wrapped_msg.amount, info.sender, config.seller),
     }
 }
 
 pub fn receive_buy(
     deps: DepsMut,
+    token_addr: Addr,
     amount: Uint128,
     buyer: Addr,
     seller: Addr,
@@ -176,7 +183,7 @@ pub fn receive_buy(
     best_bid.sold = true;
     BEST_BID.save(deps.storage, &best_bid)?;
 
-    let cw20 = Cw20Contract(buyer.clone());
+    let cw20 = Cw20Contract(token_addr);
     let msg = cw20.call(Cw20ExecuteMsg::Transfer {
         recipient: seller.into_string(),
         amount,
@@ -208,18 +215,8 @@ fn query_bid(deps: Deps, id: Uint64) -> StdResult<BidResponse> {
     })
 }
 
-fn now() -> Timestamp {
-    let seconds_since_epoch = time::SystemTime::now()
-        .duration_since(time::SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    Timestamp::from_seconds(seconds_since_epoch)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::thread;
-
     use super::*;
     use cosmwasm_std::from_binary;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
@@ -227,26 +224,31 @@ mod tests {
     #[test]
     fn test_instantiate() {
         let mut deps = mock_dependencies();
+        let token_addr = String::from("cw20 token");
         let reserve_price = Uint128::new(100);
         let increment = Uint128::new(10);
-        let duration_in_seconds = Uint64::new(3600);
+        let duration_in_blocks = Uint64::new(200);
         let msg = InstantiateMsg {
+            token_addr,
             reserve_price,
             increment,
-            duration_in_seconds,
+            duration_in_blocks,
         };
         let info = mock_info("creator", &[]);
-        let res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
-        assert_eq!(res.attributes.len(), 5);
+        let mut env = mock_env();
+        env.block.height = 200_000;
+        let res = instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
+        assert_eq!(res.attributes.len(), 6);
 
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetConfig).unwrap();
+        let res = query(deps.as_ref(), env.clone(), QueryMsg::GetConfig).unwrap();
         let config: Config = from_binary(&res).unwrap();
         assert_eq!(config.seller, "creator");
+        assert_eq!(config.token_addr, "cw20 token");
         assert_eq!(config.reserve_price, reserve_price);
         assert_eq!(config.increment, increment);
-        assert!(config.timeout.seconds() > duration_in_seconds.u64());
+        assert_eq!(config.timeout, Uint64::new(200_200));
 
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetBidSeq).unwrap();
+        let res = query(deps.as_ref(), env, QueryMsg::GetBidSeq).unwrap();
         let bid_seq: u64 = from_binary(&res).unwrap();
         assert_eq!(bid_seq, 0u64);
     }
@@ -255,29 +257,30 @@ mod tests {
     fn test_bid() {
         let mut deps = mock_dependencies();
         let msg = InstantiateMsg {
+            token_addr: String::from("cw20 token"),
             reserve_price: Uint128::new(100),
             increment: Uint128::new(10),
-            duration_in_seconds: Uint64::new(3),
+            duration_in_blocks: Uint64::new(200),
         };
         let info = mock_info("creator", &[]);
-        instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+        let mut env = mock_env();
+        env.block.height = 200_000;
+        instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
 
         let msg = ExecuteMsg::Bid {
             price: Uint128::new(80),
         };
         let info = mock_info("buyer", &[]);
-        let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
+        let err = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap_err();
         match err {
-            ContractError::CustomError { val } => {
-                assert!(val.contains("Bid price lower than reserve price"))
-            }
+            ContractError::CustomError { val } => assert!(val.contains("Bid price lower than reserve price")),
             e => panic!("unexpected error: {}", e),
         }
 
         let msg = ExecuteMsg::Bid {
             price: Uint128::new(109),
         };
-        let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
+        let err = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap_err();
         match err {
             ContractError::CustomError { val } => assert!(val.contains("Bid increment too low")),
             e => panic!("unexpected error: {}", e),
@@ -285,16 +288,16 @@ mod tests {
 
         let bid_price = Uint128::new(110);
         let msg = ExecuteMsg::Bid { price: bid_price };
-        let res = execute(deps.as_mut(), mock_env(), info.clone(), msg.clone()).unwrap();
+        let res = execute(deps.as_mut(), env.clone(), info.clone(), msg.clone()).unwrap();
         assert_eq!(res.attributes.len(), 4);
 
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetBidSeq).unwrap();
+        let res = query(deps.as_ref(), env.clone(), QueryMsg::GetBidSeq).unwrap();
         let bid_seq: u64 = from_binary(&res).unwrap();
         assert_eq!(bid_seq, 1u64);
 
         let res = query(
             deps.as_ref(),
-            mock_env(),
+            env.clone(),
             QueryMsg::GetBidRecord {
                 id: Uint64::new(bid_seq),
             },
@@ -304,27 +307,25 @@ mod tests {
         assert_eq!(bid_record.buyer, "buyer");
         assert_eq!(bid_record.price, bid_price);
 
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetBestBid).unwrap();
+        let res = query(deps.as_ref(), env.clone(), QueryMsg::GetBestBid).unwrap();
         let best_bid: BestBid = from_binary(&res).unwrap();
         assert_eq!(best_bid.id, Uint64::new(1));
         assert_eq!(best_bid.bid_record.buyer, "buyer");
         assert_eq!(best_bid.bid_record.price, bid_price);
         assert_eq!(best_bid.sold, false);
 
-        let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
+        let err = execute(deps.as_mut(), env, info.clone(), msg).unwrap_err();
         match err {
-            ContractError::CustomError { val } => {
-                assert!(val.contains("Bid price not greater than best price"))
-            }
+            ContractError::CustomError { val } => assert!(val.contains("Bid price not greater than best price")),
             e => panic!("unexpected error: {}", e),
         }
-
-        thread::sleep(time::Duration::from_secs(3));
 
         let msg = ExecuteMsg::Bid {
             price: Uint128::new(130),
         };
-        let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+        let mut env = mock_env();
+        env.block.height = 200_200;
+        let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
         match err {
             ContractError::CustomError { val } => assert!(val.contains("Auction closed")),
             e => panic!("unexpected error: {}", e),
@@ -335,18 +336,21 @@ mod tests {
     fn test_buy() {
         let mut deps = mock_dependencies();
         let msg = InstantiateMsg {
+            token_addr: String::from("cw20 token"),
             reserve_price: Uint128::new(100),
             increment: Uint128::new(10),
-            duration_in_seconds: Uint64::new(3),
+            duration_in_blocks: Uint64::new(200),
         };
         let info = mock_info("creator", &[]);
-        instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+        let mut env = mock_env();
+        env.block.height = 200_000;
+        instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
 
         let msg = ExecuteMsg::Bid {
             price: Uint128::new(110),
         };
         let buyer_info = mock_info("buyer", &[]);
-        execute(deps.as_mut(), mock_env(), buyer_info.clone(), msg).unwrap();
+        execute(deps.as_mut(), env.clone(), buyer_info.clone(), msg).unwrap();
 
         let proper_msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
             sender: String::from("buyer"),
@@ -355,7 +359,7 @@ mod tests {
         });
         let err = execute(
             deps.as_mut(),
-            mock_env(),
+            env.clone(),
             buyer_info.clone(),
             proper_msg.clone(),
         )
@@ -365,15 +369,15 @@ mod tests {
             e => panic!("unexpected error: {}", e),
         }
 
-        thread::sleep(time::Duration::from_secs(3));
-
         let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
             sender: String::from("anyone"),
             amount: Uint128::new(110),
             msg: to_binary(&ReceiveMsg::Buy).unwrap(),
         });
         let info = mock_info("anyone", &[]);
-        let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+        let mut env = mock_env();
+        env.block.height = 200_300;
+        let err = execute(deps.as_mut(), env.clone(), info, msg).unwrap_err();
         match err {
             ContractError::Unauthorized {} => {}
             e => panic!("unexpected error: {}", e),
@@ -384,17 +388,15 @@ mod tests {
             amount: Uint128::new(105),
             msg: to_binary(&ReceiveMsg::Buy).unwrap(),
         });
-        let err = execute(deps.as_mut(), mock_env(), buyer_info.clone(), msg).unwrap_err();
+        let err = execute(deps.as_mut(), env.clone(), buyer_info.clone(), msg).unwrap_err();
         match err {
-            ContractError::CustomError { val } => {
-                assert!(val.contains("Amount lower than bid price"))
-            }
+            ContractError::CustomError { val } => assert!(val.contains("Amount lower than bid price")),
             e => panic!("unexpected error: {}", e),
         }
 
         let res = execute(
             deps.as_mut(),
-            mock_env(),
+            env.clone(),
             buyer_info.clone(),
             proper_msg.clone(),
         )
@@ -402,11 +404,11 @@ mod tests {
         assert_eq!(res.messages.len(), 1);
         assert_eq!(res.attributes.len(), 4);
 
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetBestBid).unwrap();
+        let res = query(deps.as_ref(), env.clone(), QueryMsg::GetBestBid).unwrap();
         let best_bid: BestBid = from_binary(&res).unwrap();
         assert_eq!(best_bid.sold, true);
 
-        let err = execute(deps.as_mut(), mock_env(), buyer_info, proper_msg).unwrap_err();
+        let err = execute(deps.as_mut(), env, buyer_info, proper_msg).unwrap_err();
         match err {
             ContractError::CustomError { val } => assert!(val.contains("Item already sold")),
             e => panic!("unexpected error: {}", e),

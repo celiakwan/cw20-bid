@@ -1,15 +1,16 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use cosmwasm_std::{Addr, Timestamp, Uint128, Uint64};
+use cosmwasm_std::{Addr, Uint128, Uint64};
 use cw_storage_plus::{Item, Map};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Config {
     pub seller: Addr,
+    pub token_addr: Addr,
     pub reserve_price: Uint128,
     pub increment: Uint128,
-    pub timeout: Timestamp,
+    pub timeout: Uint64,
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");
