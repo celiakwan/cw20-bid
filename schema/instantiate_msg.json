@@ -3,12 +3,13 @@
   "title": "InstantiateMsg",
   "type": "object",
   "required": [
-    "duration_in_seconds",
+    "duration_in_blocks",
     "increment",
-    "reserve_price"
+    "reserve_price",
+    "token_addr"
   ],
   "properties": {
-    "duration_in_seconds": {
+    "duration_in_blocks": {
       "$ref": "#/definitions/Uint64"
     },
     "increment": {
@@ -16,6 +17,9 @@
     },
     "reserve_price": {
       "$ref": "#/definitions/Uint128"
+    },
+    "token_addr": {
+      "type": "string"
     }
   },
   "definitions": {

@@ -184,7 +184,8 @@ pub fn receive_buy(
     BEST_BID.save(deps.storage, &best_bid)?;
 
     let cw20 = Cw20Contract(token_addr);
-    let msg = cw20.call(Cw20ExecuteMsg::Transfer {
+    let msg = cw20.call(Cw20ExecuteMsg::TransferFrom {
+        owner: buyer.clone().into_string(),
         recipient: seller.into_string(),
         amount,
     })?;
