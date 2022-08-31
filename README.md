@@ -1,5 +1,5 @@
 # cw20-bid
-A smart contract written in Rust and built with CosmWasm for options trading.
+A smart contract written in Rust and built with CosmWasm to simulate an auction process that allows buyers to place bids and settle the payment.
 
 ### Version
 - [Rust](https://www.rust-lang.org/): 1.61.0
@@ -191,7 +191,7 @@ wasmd tx wasm execute $CONTRACT2 "$BUY" \
     --from wallet3 $TXFLAG -y
 ```
 
-27. Query the best bid by the state address.
+27. Query the best bid by the state address. It should show the item has already been sold.
 ```
 wasmd query wasm contract-state smart $CONTRACT2 '"get_best_bid"' $NODE
 ```
